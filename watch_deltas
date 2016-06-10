@@ -1,0 +1,234 @@
+#!/usr/bin/perl
+
+# Copyright (c) 2014 jeagle
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+
+use strict;
+use warnings;
+use Getopt::Long qw/ :config no_ignore_case /;
+use File::Basename;
+use Term::Cap;
+
+my @last_data;
+my %config;
+my $terminal = Term::Cap->Tgetent( { OSPEED => 9600 } );
+my $BOUNDRY = '\b';
+my @COMPARISON_DATA;
+my $new_numbers;
+my $old_numbers;
+my $scale_postfix = '';
+
+# Have to pre-populate this key in the hash otherwise GetOptions doesn't work
+# right.
+$config{compare} = [];
+GetOptions( \%config,
+    'interval|i=s', 'clear|C', 'help|h', 'ignore-zero|z', '1', 'match|m=s',
+    'no-boundry|B', 'compare=s@{2}', 'show-current|c', 'keep-width|w',
+    'no-decimal|d', 'scale|s=s'
+) || die_usage();
+
+$config{command} = join( ' ', @ARGV );
+if ( $config{help} || !$config{command} ) { die_usage(); }
+if ( !$config{interval} )    { $config{interval} = 1; }
+if ( $config{match} )        { $config{match}    = qr/$config{match}/; }
+if ( $config{'no-boundry'} ) { $BOUNDRY          = ''; }
+if ( $config{'scale'} ) {
+    if ( $config{'scale'} =~ /^\d+$/ ) {
+        $scale_postfix = '*';
+        $config{'scale'} = int( $config{'scale'} );
+    } else {
+        $scale_postfix = $config{'scale'};
+        if ( $config{'scale'} eq 'k' ) { $config{'scale'} = 1024; }
+        elsif ( $config{'scale'} eq 'm' ) { $config{'scale'} = 1024 * 1024; }
+        elsif ( $config{'scale'} eq 'g' ) { $config{'scale'} = 1024 * 1024 * 1024; }
+        elsif ( $config{'scale'} eq 'bit' ) { $config{'scale'}  = 1 / 8; }
+        elsif ( $config{'scale'} eq 'kbit' ) { $config{'scale'} = 1_000 / 8; }
+        elsif ( $config{'scale'} eq 'mbit' ) { $config{'scale'} = 1_000_000 / 8; }
+        elsif ( $config{'scale'} eq 'gbit' ) { $config{'scale'} = 1_000_000_000 / 8; }
+        else { die_usage(); }
+    }
+}
+
+sub die_usage {
+    my $me = basename( $0 );
+    die << "    USAGE";
+$me: Print the difference between repeated command output.
+Example: $me -- netstat -s
+
+$me [args] [--] <command>
+
+command          Command to run. Passed directly to the shell.
+-interval|i      How frequently to run the command, defaults to 1 second.
+-match|m         Only calculate deltas for lines matching this Perl regular
+                 expression.
+-no-boundry|B    Calculate for all numbers, don't ignore numbers that appear
+                 to be part of words.
+-clear|C         Clear the screen between outputs.
+-ignore-zero|z   Don't print lines with a 0 delta.
+-1               Run once and then exit.
+-help|h          This message.
+-compare a b     Compare lines that match the regular expressions a and b.
+                 If more than one line matches a given expression, the last
+                 last is used.
+-show-current|c  Show the current value in parenthesis after the delta.
+-keep-width|w    Whitespace-pad numbers on outpit to keep width the same.
+-no-decimal|d    Don't match decimal numbers (ie, treat 1.2 as two numbers).
+-scale|s         Scale printed numbers as (k)ilobytes, (m)egabytes,
+                 (g)igabytes, or give a number to divide by. (bit), (kbit),
+                 (mbit), and (gbit) will convert the input in bytes to bits.
+
+    USAGE
+}
+
+sub get_numbers {
+    my ( $data, $comparisons ) = @_;
+    my @numbers;
+    my $i            = 0;
+    my $compare_line = 0;
+
+    foreach my $line ( @{$data} ) {
+        foreach my $comp ( @{$comparisons} ) {
+            if ( $line =~ $comp->{a} ) {
+                $comp->{a_line} = $i;
+            }
+            if ( $line =~ $comp->{b} ) {
+                $comp->{b_line} = $i;
+            }
+        }
+
+        $line =~ s/%/%%/g;
+        if ( $config{match} && $line !~ m/$config{match}/ ) {
+            push @numbers, [];
+            next;
+        }
+        if ( $config{'no-decimal'} ) {
+            my ( @n ) = $line =~ m/$BOUNDRY(\d+)$BOUNDRY/g;
+            push @numbers, \@n;
+            $line =~ s/$BOUNDRY\d+$BOUNDRY/%s/g;
+        } else {
+            my ( @n ) = $line =~ m/$BOUNDRY\d+(?:\.\d+)?$BOUNDRY/g;
+            push @numbers, \@n;
+            $line =~ s/$BOUNDRY\d+(?:\.\d+)?$BOUNDRY/%s/g;
+        }
+
+        $i++;
+    }
+    return \@numbers;
+}
+
+sub fresh_comparison_data {
+    my @c;
+    foreach my $comp ( @COMPARISON_DATA ) {
+        push @c, { %{$comp} };
+    }
+    return @c;
+}
+
+for ( my $i = 0; $i <= $#{ $config{compare} }; $i += 2 ) {
+    my $i2 = $i + 1;
+    push @COMPARISON_DATA, { a => qr/$config{compare}->[$i]/, b => qr/$config{compare}->[$i2]/ };
+}
+
+my @out         = `$config{command}`;
+my @comparisons = fresh_comparison_data();
+$new_numbers    = get_numbers( \@out, \@comparisons );
+
+while ( 1 ) {
+    my @comparisons = fresh_comparison_data();
+    sleep( $config{interval} );
+    $old_numbers = $new_numbers;
+    @out         = `$config{command}`;
+    $new_numbers = get_numbers( \@out, \@comparisons );
+    if ( $config{clear} ) {
+        print $terminal->Tputs( 'cl' );
+    }
+    for ( my $li = 0; $li <= $#out; $li++ ) {
+        my @for_printf;
+        my $all_zeroes = 1;
+        my @save_comp_data;
+
+        foreach my $comp ( @comparisons ) {
+            if ( exists $comp->{a_line} && $li == $comp->{a_line} ) {
+                $comp->{a_data} = [];
+                push @save_comp_data, $comp->{a_data};
+            }
+            if ( exists $comp->{b_line} && $li == $comp->{b_line} ) {
+                $comp->{b_data} = [];
+                push @save_comp_data, $comp->{b_data};
+            }
+        }
+
+        for ( my $ni = 0; $ni <= $#{ $new_numbers->[$li] }; $ni++ ) {
+            my $new_val = $new_numbers->[$li]->[$ni];
+            my $delta   = $new_val - $old_numbers->[$li]->[$ni];
+
+            if ( $delta != 0 ) { $all_zeroes = 0; }
+            if ( $config{'show-current'} && $new_val != 0 ) { $all_zeroes = 0; }
+
+            foreach my $comp ( @save_comp_data ) {
+                push @{$comp}, $delta;
+            }
+
+            if ( $config{'scale'} ) {
+                $delta = sprintf( '%0.4f%s', $delta / $config{'scale'}, $scale_postfix );
+            }
+
+            if ( $config{'show-current'} ) {
+                $delta .= ' (' . $new_val . ')';
+            }
+            if ( $config{'keep-width'} && length( $delta ) < length( $old_numbers->[$li]->[$ni] ) ) {
+                $delta = ' ' x ( length( $old_numbers->[$li]->[$ni] ) - length( $delta ) ) . $delta;
+            }
+            push @for_printf, $delta;
+        }
+
+        if ( !$config{'ignore-zero'} || !$all_zeroes ) {
+            printf( $out[$li], @for_printf );
+        }
+    }
+
+    foreach my $comp ( @comparisons ) {
+        my ( @deltas, @pcts );
+        if ( !exists $comp->{a_line} && !exists $comp->{b_line} ) {
+            printf "Lines not found: %s, %s\n", $comp->{a}, $comp->{b};
+            next;
+        }
+        if ( !exists $comp->{a_line} ) {
+            printf "Line not found: %s\n", $comp->{a};
+            next;
+        }
+        if ( !exists $comp->{b_line} ) {
+            printf "Line not found: %s\n", $comp->{a};
+            next;
+        }
+        for ( my $di = 0; $di <= $#{ $comp->{a_data} }; $di++ ) {
+            push @deltas, $comp->{a_data}->[$di] - $comp->{b_data}->[$di];
+            push @pcts, $comp->{b_data}->[$di] != 0 ? $comp->{a_data}->[$di] / $comp->{b_data}->[$di] : 'Inf';
+        }
+        printf "%s - %s = %s\n", $comp->{a}, $comp->{b}, join( ', ', @deltas );
+        printf "%s / %s = %s\n", $comp->{a}, $comp->{b}, join( ', ', @pcts );
+    }
+
+    if ( $config{1} ) {
+        last;
+    }
+}
+

@@ -1,0 +1,115 @@
+#!/usr/bin/perl
+
+# Copyright (c) 2014 jeagle
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+use warnings;
+use strict;
+use File::Basename;
+use File::Copy;
+use File::Compare;
+use File::stat;
+
+my $POSTFIX = '.backup.';
+
+sub die_usage {
+    my $me = basename($0);
+    die <<"    USAGE"
+Usage: $me <file> [copies] [--help]
+
+Makes up to copies number of backup copies of file in the directory with file.
+Backups are postfixed ${POSTFIX}N. The first backup is copied from the source,
+the rest are moved into place. Backups are only taken if file content changes.
+
+file       Path to the file to backup.
+copies     Number of copies to keep. Default is 10. Must be >= 1.
+-h|--help  This message.
+
+    USAGE
+}
+
+sub try_backup {
+    my ( $from, $to, $do_copy ) = @_;
+    my $old_stat = stat( $from );
+    if ( $do_copy ) {
+        if ( copy( $from, $to ) == 0 ) {
+            die "File::Copy::copy('$from', '$to') failed: $!";
+        }
+    } else {
+        if ( move( $from, $to ) == 0 ) {
+            die "File::Copy::move('$from', '$to') failed: $!";
+        }
+    }
+    my $new_stat = stat( $to );
+    if ( ( $new_stat->mode & 07777 ) != ( $old_stat->mode & 07777 ) ) {
+        chmod( $old_stat->mode & 07777, $to );
+    }
+    if ( $old_stat->uid != $new_stat->uid || $old_stat->gid != $new_stat->gid ) {
+        chown( $old_stat->uid, $old_stat->gid, $to );
+    }
+}
+
+sub backup_file {
+    my ( $from, $to, $do_copy ) = @_;
+
+    # No source file. Nothing to do.
+    if ( ! -r $from ) { return 0; }
+
+    # No destination file. Just copy.
+    if ( ! -e $to ) {
+        try_backup( $from, $to, $do_copy );
+        return 1;
+    }
+
+    my $r = compare( $from, $to );
+    if ( $r == -1 ) {
+        die "Failed to compare $from and $to. File::Compare::compare returned -1. \$! is: $!";
+    }
+    # compare returns zero if the files are identical.
+    if ( $r == 0 ) {
+        return 0;
+    }
+    try_backup( $from, $to, $do_copy );
+    return 1;
+}
+
+my $file_path = $ARGV[0] || die_usage();
+if ( $file_path eq '--help' || $file_path eq '-h' ) { die_usage(); }
+my $copies = $ARGV[1] || 10;
+if ( $copies !~ /^\d+/ || $copies != int( $copies ) || $copies < 1 ) { die_usage(); }
+
+if ( ! -r $file_path ) { exit 1; } # Nothing to do.
+
+# Don't do anything if our source didn't change.
+if ( ( -e $file_path . $POSTFIX . '1' ) && compare( $file_path, $file_path . $POSTFIX . '1' ) == 0 ) {
+    exit(0);
+}
+
+umask 0077;
+for ( my $copy_number = $copies; $copy_number > 1; $copy_number-- ) {
+    # Skip this iteration if we don't actually need to make room for another
+    # file.
+    if ( $copy_number > 2 && ( ! -e $file_path . $POSTFIX . ( $copy_number - 2 ) ) ) {
+        next;
+    }
+    backup_file( $file_path . $POSTFIX . ( $copy_number - 1 ), $file_path . $POSTFIX . ( $copy_number ), 0 );
+}
+backup_file( $file_path, $file_path . $POSTFIX . '1', 1 );
+
