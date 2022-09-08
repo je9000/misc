@@ -26,7 +26,6 @@ use File::Copy;
 use File::Compare;
 use File::stat;
 use Getopt::Long qw/ :config no_ignore_case /;
-use Time::Piece;
 
 my $POSTFIX = '.backup.';
 my %config;
