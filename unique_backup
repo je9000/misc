@@ -36,9 +36,9 @@ sub die_usage {
     die <<"    USAGE"
 Usage: $me [--path] [--copies] [--verbose|v] [--help|h] <file>
 
-Makes up to copies number of backup copies of file in the directory with file.
-Backups are postfixed ${POSTFIX}N. The first backup is copied from the source,
-the rest are moved into place. Backups are only taken if file content changes.
+Makes up to "copies" number of unique backup copies of file. Backups are
+postfixed "${POSTFIX}N". The first backup is copied from the source and the
+are moved into place. Backups are only taken if file content changes.
 
 file          Path to the file to backup.
 --copies      Number of copies to keep. Default is 10. Must be >= 1.
@@ -96,7 +96,7 @@ sub backup_file {
     return 1;
 }
 
-GetOptions( \%config, 'path:s', 'count:i', 'help|h', 'verbose|v+' ) || die_usage();
+GetOptions( \%config, 'path:s', 'copies', 'help|h', 'verbose|v+' ) || die_usage();
 
 my $file_path = $ARGV[0] || die_usage();
 if ( $config{'help'} ) { die_usage(); }
@@ -104,7 +104,7 @@ if ( $config{'help'} ) { die_usage(); }
 if ( ! -r $file_path ) { warn "File not readable\n"; exit 1; }
 if ( ! -f $file_path ) { warn "File not a file\n"; exit 1; }
 
-my $copies = exists $config{'count'} ? $config{'count'} : 10;
+my $copies = exists $config{'copies'} ? $config{'copies'} : 10;
 if ( $copies !~ /^\d+/ || $copies != int( $copies ) || $copies < 1 ) { die_usage(); }
 
 my $backup_path;
