@@ -1,0 +1,145 @@
+#!/usr/local/bin/perl
+
+# Copyright (c) 2014 jeagle
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+# all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+# THE SOFTWARE.
+
+use warnings;
+use strict;
+use File::Copy;
+use File::Compare;
+use File::stat;
+use Getopt::Long qw/ :config no_ignore_case /;
+use Time::Piece;
+
+my $POSTFIX = '.backup.';
+my %config;
+
+sub die_usage {
+    my ($v, $d, $me) = File::Spec->splitpath( $0 );
+    die <<"    USAGE"
+Usage: $me [--path] [--copies] [--verbose|v] [--help|h] <file>
+
+Makes up to copies number of backup copies of file in the directory with file.
+Backups are postfixed ${POSTFIX}N. The first backup is copied from the source,
+the rest are moved into place. Backups are only taken if file content changes.
+
+file          Path to the file to backup.
+--copies      Number of copies to keep. Default is 10. Must be >= 1.
+--path        Place backup copies here rather than in the same location as
+              file.
+-h|--help     This message.
+-v|--verbose  Be verbose.
+
+    USAGE
+}
+
+sub do_backup {
+    my ( $from, $to, $do_copy ) = @_;
+    my $old_stat = stat( $from );
+    if ( $do_copy ) {
+        if ( copy( $from, $to ) == 0 ) {
+            die "File::Copy::copy('$from', '$to') failed: $!";
+        }
+    } else {
+        if ( move( $from, $to ) == 0 ) {
+            die "File::Copy::move('$from', '$to') failed: $!";
+        }
+    }
+    my $new_stat = stat( $to );
+    if ( ( $new_stat->mode & 07777 ) != ( $old_stat->mode & 07777 ) ) {
+        chmod( $old_stat->mode & 07777, $to );
+    }
+    if ( $old_stat->uid != $new_stat->uid || $old_stat->gid != $new_stat->gid ) {
+        chown( $old_stat->uid, $old_stat->gid, $to );
+    }
+}
+
+sub backup_file {
+    my ( $from, $to, $do_copy ) = @_;
+
+    # No source file. Nothing to do.
+    if ( ! -r $from ) { return 0; }
+
+    # No destination file. Just copy.
+    if ( ! -e $to ) {
+        do_backup( $from, $to, $do_copy );
+        return 1;
+    }
+
+    my $r = compare( $from, $to );
+    if ( $r == -1 ) {
+        die "Failed to compare $from and $to. File::Compare::compare returned -1. \$! is: $!";
+    }
+    # compare returns zero if the files are identical.
+    if ( $r == 0 ) {
+        print "Duplicate files found in backup copies, dest will probably be overwritten  ($from -> $to)" if $config{'verbose'};
+        return 0;
+    }
+    do_backup( $from, $to, $do_copy );
+    return 1;
+}
+
+GetOptions( \%config, 'path:s', 'count:i', 'help|h', 'verbose|v+' ) || die_usage();
+
+my $file_path = $ARGV[0] || die_usage();
+if ( $config{'help'} ) { die_usage(); }
+
+if ( ! -r $file_path ) { warn "File not readable\n"; exit 1; }
+if ( ! -f $file_path ) { warn "File not a file\n"; exit 1; }
+
+my $copies = exists $config{'count'} ? $config{'count'} : 10;
+if ( $copies !~ /^\d+/ || $copies != int( $copies ) || $copies < 1 ) { die_usage(); }
+
+my $backup_path;
+if ($config{'path'}) {
+    my ($bv, $bd, $bf) = File::Spec->splitpath( $config{'path'}, 1 );
+    my ($v, $d, $f) = File::Spec->splitpath( $file_path );
+
+    if (! -w File::Spec->catpath( $bv, $bd, '' )) {
+        die "Backup path not writable\n";
+    }
+    # The path from the path argument, with the target filename
+    $backup_path = File::Spec->catpath( $bv, $bd, $f );
+} else {
+    $backup_path = $file_path;
+}
+
+# Don't do anything if our source didn't change.
+if ( -e "${backup_path}${POSTFIX}1" ) {
+    my $r = compare( $file_path, "${backup_path}${POSTFIX}1" );
+    if ($r == -1) { die "Failed to compare files."; }
+    if ($r == 0) {
+        print "Current file and ${POSTFIX}1 are the same, not copying" if $config{'verbose'};
+        exit(0);
+    }
+}
+
+umask 0077;
+for ( my $copy_number = $copies; $copy_number > 1; $copy_number-- ) {
+    # Skip this iteration if we don't actually need to make room for another
+    # file.
+    if ( $copy_number > 2 && ( ! -e $file_path . $POSTFIX . ( $copy_number - 2 ) ) ) {
+        print "Hole found near file $copy_number" if $config{'verbose'};
+        next;
+    }
+    backup_file( "${backup_path}${POSTFIX}" . ( $copy_number - 1 ), "${backup_path}${POSTFIX}${copy_number}", 0 );
+}
+backup_file( $file_path, "${backup_path}${POSTFIX}1", 1 );
+
