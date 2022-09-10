@@ -95,7 +95,7 @@ sub backup_file {
     return 1;
 }
 
-GetOptions( \%config, 'path:s', 'copies', 'help|h', 'verbose|v+' ) || die_usage();
+GetOptions( \%config, 'path:s', 'copies:i', 'help|h', 'verbose|v+' ) || die_usage();
 
 my $file_path = $ARGV[0] || die_usage();
 if ( $config{'help'} ) { die_usage(); }
